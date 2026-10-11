@@ -33,28 +33,43 @@ PAGE = """<!doctype html>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: #0b0f17; color: #e5e9f0; }
-  header { padding: 12px 16px; background: #121826; position: sticky; top: 0; display: flex; gap: 10px; align-items: center; }
-  header b { font-size: 16px; } .muted { color: #8b95a7; font-size: 13px; }
-  #log { padding: 12px 16px 120px; }
-  .ev { padding: 6px 10px; margin: 6px 0; border-radius: 8px; background: #121826; white-space: pre-wrap; word-break: break-word; }
+  /* Fixed header + footer; body padding keeps content clear of both. */
+  body { margin: 0; font: 15px/1.45 system-ui, sans-serif; background: #0b0f17; color: #e5e9f0;
+         padding: 54px 0 74px; }
+  header { position: fixed; top: 0; left: 0; right: 0; z-index: 100; height: 54px;
+           padding: 0 16px; background: #121826; border-bottom: 1px solid #222c40;
+           display: flex; gap: 10px; align-items: center; }
+  header b { font-size: 16px; flex: none; }
+  /* status stays on one line and ellipsizes, so the header height never grows */
+  .muted { color: #8b95a7; font-size: 13px; flex: 1; min-width: 0;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #log { padding: 10px 16px; }
+  .ev { padding: 8px 10px; margin: 8px 0; border-radius: 8px; background: #121826;
+        white-space: pre-wrap; overflow-wrap: anywhere; }
   .ev.task { background: #1c2640; } .ev.say { background: #163a2b; }
   .ev.tool { color: #9fc3ff; } .ev.result { color: #8b95a7; font-size: 13px; }
-  .ev.info { color: #ffd58a; } .ev .k { font-size: 11px; text-transform: uppercase; color: #6b7280; opacity: .6; margin-right: 6px; }
-  footer { position: fixed; bottom: 0; left: 0; right: 0; background: #121826; padding: 10px 12px; display: flex; gap: 8px; border-top: 1px solid #222c40; }
+  .ev.info { color: #ffd58a; }
+  /* label on its own line above the text -- no overlap with long content */
+  .ev .k { display: block; margin-bottom: 3px; font-size: 11px; letter-spacing: .05em;
+           text-transform: uppercase; color: #8b95a7; opacity: .75; }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; z-index: 100; background: #121826;
+           padding: 10px 12px; display: flex; gap: 8px; align-items: center; border-top: 1px solid #222c40; }
   input, button { font: inherit; border-radius: 8px; border: 1px solid #2a3550; }
-  #task { flex: 1; padding: 11px; background: #0b0f17; color: #e5e9f0; }
-  button { padding: 11px 14px; background: #2d6cf6; color: #fff; border: none; }
+  #task { flex: 1; min-width: 0; padding: 11px; background: #0b0f17; color: #e5e9f0; }
+  button { padding: 11px 14px; background: #2d6cf6; color: #fff; border: none; white-space: nowrap; }
   button.stop { background: #b4353a; } button:disabled { opacity: .5; }
   #attach { background: #2a3550; padding: 11px 10px; }
-  #thumbs { position: fixed; bottom: 60px; left: 0; right: 0; display: flex; gap: 6px; padding: 0 12px; flex-wrap: wrap; }
+  #thumbs { position: fixed; bottom: 64px; left: 0; right: 0; z-index: 100;
+            display: flex; gap: 6px; padding: 0 12px; flex-wrap: wrap; }
   #thumbs .t { position: relative; }
   #thumbs img { height: 54px; border-radius: 6px; border: 1px solid #2a3550; }
   #thumbs .x { position: absolute; top: -6px; right: -6px; background: #b4353a; color: #fff;
                border-radius: 50%; width: 20px; height: 20px; line-height: 20px; text-align: center; font-size: 13px; }
-  #prompt { display: none; padding: 12px 16px; background: #2a2140; border-bottom: 1px solid #4a3a7a; position: sticky; top: 49px; }
+  #prompt { display: none; margin: 10px 12px 0; padding: 12px; background: #2a2140;
+            border: 1px solid #4a3a7a; border-radius: 8px; }
   #prompt .q { margin-bottom: 8px; } #prompt .row { display: flex; gap: 8px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a556b; }
+  #prompt input { flex: 1; min-width: 0; padding: 11px; background: #0b0f17; color: #e5e9f0; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a556b; flex: none; }
   .dot.on { background: #41d18f; }
 </style></head><body>
 <header><span class="dot" id="dot"></span><b>Pilot</b><span class="muted" id="status">connecting...</span></header>
@@ -76,10 +91,12 @@ let since = 0, curPrompt = null;
 const log = document.getElementById('log');
 function esc(s){ return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function add(ev){
+  const nearBottom = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 140);
   const d = document.createElement('div');
   d.className = 'ev ' + ev.kind;
   d.innerHTML = '<span class="k">'+ev.kind+'</span>' + esc(ev.text);
-  log.appendChild(d); window.scrollTo(0, document.body.scrollHeight);
+  log.appendChild(d);
+  if(nearBottom) window.scrollTo(0, document.body.scrollHeight);
 }
 async function api(path, opts){
   opts = opts || {}; opts.headers = Object.assign({'X-Pilot-Token': TOKEN}, opts.headers||{});
