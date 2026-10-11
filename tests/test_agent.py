@@ -20,7 +20,7 @@ class FakeLLM:
         self.script = list(script)
         self.sent = []
 
-    def chat(self, messages, tools=None, tool_choice="auto", model=None):
+    def chat(self, messages, tools=None, tool_choice="auto", **kwargs):
         self.sent.append(json.loads(json.dumps(messages)))
         content, calls = self.script.pop(0)
         return SimpleNamespace(content=content, tool_calls=calls)
@@ -193,7 +193,7 @@ def test_gemini_thought_signature_is_echoed_back():
     sent = []
 
     class FakeLLM:
-        def chat(self, messages, tools=None, tool_choice="auto", model=None):
+        def chat(self, messages, tools=None, tool_choice="auto", **kwargs):
             sent.append(json.loads(json.dumps(messages)))
             return script.pop(0)
 

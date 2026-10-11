@@ -87,12 +87,18 @@ def doctor(cfg) -> int:
         _row("ok", "display", "available")
     else:
         _row("warn", "display", "none -- desktop control disabled, browser can run headless")
+    backends = cfg.backends()
     n_keys = len(cfg.api_keys)
     if n_keys:
         _row("ok", "api key", f"{n_keys} key(s) set" + (" (with failover)" if n_keys > 1 else ""))
     else:
         _row("warn", "api key", "not set (fine for local models, required for hosted APIs)")
-    print(f"  model={cfg.model}  base_url={cfg.base_url}")
+    if cfg.fallbacks:
+        names = ", ".join(f"{b.label}:{b.model}" for b in cfg.fallbacks)
+        _row("ok", "fallbacks", f"{len(cfg.fallbacks)} provider(s): {names}")
+    _row("ok" if not cfg.auto_approve else "warn", "confirm",
+         "asks before shell/file writes" if not cfg.auto_approve else "auto-approve ON (never asks)")
+    print(f"  model={cfg.model}  base_url={cfg.base_url}  ({len(backends)} backend(s) in rotation)")
     print(f"  secrets: {', '.join(sorted(cfg.secrets)) or '(none)'}")
     return 0 if ok else 1
 

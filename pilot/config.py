@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
     "ollama": "http://localhost:11434/v1",
 }
@@ -69,6 +70,28 @@ class ServerConfig:
 
 
 @dataclass
+class Backend:
+    """One place to get completions from: an endpoint + model + key.
+
+    Pilot tries backends in order and moves to the next when one is
+    rate-limited or out of quota. Backends may be different providers
+    (e.g. Gemini primary, NVIDIA fallback)."""
+    base_url: str
+    model: str
+    api_key: str = ""
+    vision_model: Optional[str] = None
+    label: str = ""
+
+
+def _host_label(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname or url
+    except Exception:
+        return url
+
+
+@dataclass
 class Config:
     # --- model / brain ---
     api_key: str = ""
@@ -76,8 +99,11 @@ class Config:
     extra_api_keys: List[str] = field(default_factory=list)
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o"
+    provider: str = ""
     # Optional separate model for vision-only "look at the screen" steps.
     vision_model: Optional[str] = None
+    # Other providers/models to fall back to when the primary is exhausted.
+    fallbacks: List[Backend] = field(default_factory=list)
     temperature: float = 0.0
     max_steps: int = 40
 
@@ -96,7 +122,7 @@ class Config:
 
     @property
     def api_keys(self) -> List[str]:
-        """All usable keys, primary first, for rotation on rate limits."""
+        """All usable keys for the primary provider, in rotation order."""
         keys = [self.api_key, *self.extra_api_keys]
         seen, out = set(), []
         for k in keys:
@@ -104,6 +130,17 @@ class Config:
             if k and k not in seen:
                 seen.add(k)
                 out.append(k)
+        return out
+
+    def backends(self) -> List[Backend]:
+        """Ordered list of places to try: every primary key first, then each
+        fallback provider. Rotation on rate limits walks this list."""
+        label = self.provider or _host_label(self.base_url)
+        out: List[Backend] = [
+            Backend(self.base_url, self.model, k, self.vision_model, label)
+            for k in (self.api_keys or [""])
+        ]
+        out.extend(self.fallbacks)
         return out
 
     def secret(self, name: str) -> Dict[str, str]:
@@ -118,6 +155,9 @@ class Config:
         d = asdict(self)
         d["api_key"] = "***" if self.api_key else ""
         d["extra_api_keys"] = ["***"] * len(self.extra_api_keys)
+        for fb in d.get("fallbacks", []):
+            if fb.get("api_key"):
+                fb["api_key"] = "***"
         d["secrets"] = {k: {kk: "***" for kk in v} for k, v in self.secrets.items()}
         d["server"]["token"] = "***" if self.server.token else ""
         d["config_dir"] = str(self.config_dir)
@@ -156,10 +196,27 @@ def load_config(path: Optional[str] = None, overrides: Optional[Dict[str, Any]] 
     cfg.max_steps = int(model_tbl.get("max_steps", cfg.max_steps))
     # provider = "gemini" picks the endpoint for you (unless base_url is set explicitly).
     provider = model_tbl.get("provider")
-    if provider and "base_url" not in model_tbl and "PILOT_BASE_URL" not in os.environ:
-        if provider not in PROVIDER_BASE_URLS:
-            raise ValueError(f"Unknown provider {provider!r}. Known: {sorted(PROVIDER_BASE_URLS)}")
-        cfg.base_url = PROVIDER_BASE_URLS[provider]
+    if provider:
+        cfg.provider = provider
+        if "base_url" not in model_tbl and "PILOT_BASE_URL" not in os.environ:
+            if provider not in PROVIDER_BASE_URLS:
+                raise ValueError(f"Unknown provider {provider!r}. Known: {sorted(PROVIDER_BASE_URLS)}")
+            cfg.base_url = PROVIDER_BASE_URLS[provider]
+
+    # Fallback providers/models: [[model.fallbacks]] tables, tried in order
+    # after the primary is rate-limited or out of quota.
+    for fb in model_tbl.get("fallbacks", []):
+        fb_provider = fb.get("provider")
+        fb_base = fb.get("base_url") or (PROVIDER_BASE_URLS.get(fb_provider) if fb_provider else None)
+        if not fb_base:
+            raise ValueError("Each [[model.fallbacks]] needs a provider or a base_url.")
+        cfg.fallbacks.append(Backend(
+            base_url=fb_base,
+            model=fb.get("name", cfg.model),
+            api_key=str(fb.get("api_key", "")),
+            vision_model=fb.get("vision_name"),
+            label=fb.get("label") or fb_provider or _host_label(fb_base),
+        ))
 
     beh = data.get("behaviour", {})
     cfg.auto_approve = _coerce_bool(beh.get("auto_approve"), cfg.auto_approve)
@@ -214,6 +271,19 @@ def load_config(path: Optional[str] = None, overrides: Optional[Dict[str, Any]] 
         cfg.browser.executable_path = os.environ["PILOT_BROWSER_PATH"]
     if os.environ.get("PILOT_AUTO_APPROVE"):
         cfg.auto_approve = _coerce_bool(os.environ["PILOT_AUTO_APPROVE"], cfg.auto_approve)
+
+    # Quick single fallback provider from env (no TOML array needed):
+    # PILOT_FALLBACK_BASE_URL (or _PROVIDER), PILOT_FALLBACK_MODEL, PILOT_FALLBACK_API_KEY
+    fb_provider = os.environ.get("PILOT_FALLBACK_PROVIDER")
+    fb_base = os.environ.get("PILOT_FALLBACK_BASE_URL") or (
+        PROVIDER_BASE_URLS.get(fb_provider) if fb_provider else None)
+    fb_model = os.environ.get("PILOT_FALLBACK_MODEL")
+    fb_key = os.environ.get("PILOT_FALLBACK_API_KEY", "")
+    if fb_base and fb_model:
+        cfg.fallbacks.append(Backend(
+            base_url=fb_base, model=fb_model, api_key=fb_key,
+            label=fb_provider or _host_label(fb_base),
+        ))
 
     # Secrets from env: PILOT_SECRET_<NAME>_USER / _PASS / _VALUE
     for key, value in os.environ.items():

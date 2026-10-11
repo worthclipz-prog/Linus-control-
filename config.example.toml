@@ -24,8 +24,21 @@ max_steps = 40
 #   provider = "ollama"
 #   name     = "qwen2.5vl:7b"               # needs vision + tool calling
 
+# Fallback providers: tried in order after the primary is rate-limited / out of
+# quota. Each needs a provider (or base_url), a model name, and its own key.
+# Known providers: openai, gemini, nvidia, openrouter, ollama.
+# The fallback model must support tool calling; if it has no vision, browser
+# tasks still work but desktop-screenshot steps won't.
+#
+# [[model.fallbacks]]
+# provider = "nvidia"
+# name     = "nvidia/nemotron-3.5-lightning-30b-a3b"
+# api_key  = "nvapi-..."                     # your NVIDIA build.nvidia.com key
+
 [behaviour]
-auto_approve = false   # true = run shell commands / file writes without asking
+# false = ask before running shell commands / writing files.
+# true  = never ask (good for unattended / phone use -- it's your machine).
+auto_approve = false
 
 # Phone / remote control panel (pilot --serve).
 [server]

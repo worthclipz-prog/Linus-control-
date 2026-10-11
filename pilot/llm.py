@@ -1,17 +1,15 @@
-"""Thin wrapper around an OpenAI-compatible Chat Completions endpoint.
+"""Thin wrapper around one or more OpenAI-compatible Chat Completions backends.
 
-Works with the official OpenAI API and with any server that speaks the same
-protocol: Google Gemini (its OpenAI-compatible endpoint), Azure OpenAI,
-OpenRouter, Ollama, LM Studio, vLLM, ... The brain is pluggable: set
-``base_url`` + ``model`` (or ``provider``) in config.
-
-Give it several API keys and it fails over to the next one when the active
-key is rate-limited or out of quota -- useful for stacking several free
-Gemini keys.
+Each backend is an endpoint + model + key (see config.Backend). Pilot tries
+them in order and fails over to the next when the active one is rate-limited
+or out of quota. Backends can be different providers, so you can run, say,
+Gemini as the primary and NVIDIA NIM as the fallback.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, List, Optional
+
+from .config import Backend
 
 
 def _is_rate_limit(exc: Exception) -> bool:
@@ -29,9 +27,7 @@ def _is_rate_limit(exc: Exception) -> bool:
 class LLM:
     def __init__(
         self,
-        api_keys,
-        base_url: str,
-        model: str,
+        backends,
         temperature: float = 0.0,
         on_notice: Optional[Callable[[str], None]] = None,
     ):
@@ -43,60 +39,61 @@ class LLM:
                 "`pip install -r requirements.txt`."
             ) from exc
         self._OpenAI = OpenAI
-        if isinstance(api_keys, str):
-            api_keys = [api_keys]
-        # A key is required by the SDK even for many local servers; use a
-        # harmless placeholder when none is configured (local models).
-        self.api_keys: List[str] = [k for k in (api_keys or []) if k] or ["sk-no-key-required"]
-        self.base_url = base_url
-        self.model = model
+        if isinstance(backends, Backend):
+            backends = [backends]
+        self.backends: List[Backend] = list(backends) or [Backend("https://api.openai.com/v1", "gpt-4o")]
         self.temperature = temperature
         self.on_notice = on_notice or (lambda msg: None)
         self._idx = 0
-        self._clients: Dict[str, Any] = {}
+        self._clients: dict = {}
 
-    def _client(self, key: str):
+    def _client(self, b: Backend):
+        key = (b.base_url, b.api_key or "sk-no-key-required")
         if key not in self._clients:
-            self._clients[key] = self._OpenAI(api_key=key, base_url=self.base_url)
+            self._clients[key] = self._OpenAI(api_key=key[1], base_url=b.base_url)
         return self._clients[key]
 
     @property
     def active_key_index(self) -> int:
         return self._idx
 
+    @property
+    def active_model(self) -> str:
+        return self.backends[self._idx].model
+
+    def _describe(self, i: int) -> str:
+        b = self.backends[i]
+        return f"{b.label or b.base_url} ({b.model})"
+
     def chat(
         self,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
+        messages: List[dict],
+        tools: Optional[List[dict]] = None,
         tool_choice: str = "auto",
-        model: Optional[str] = None,
+        prefer_vision: bool = False,
     ) -> Any:
-        kwargs: Dict[str, Any] = {
-            "model": model or self.model,
-            "messages": messages,
-            "temperature": self.temperature,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
-
-        n = len(self.api_keys)
+        n = len(self.backends)
         last_exc: Optional[Exception] = None
-        for attempt in range(n):
-            key = self.api_keys[self._idx]
+        for _ in range(n):
+            b = self.backends[self._idx]
+            model = b.vision_model if (prefer_vision and b.vision_model) else b.model
+            kwargs: dict = {"model": model, "messages": messages, "temperature": self.temperature}
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = tool_choice
             try:
-                resp = self._client(key).chat.completions.create(**kwargs)
+                resp = self._client(b).chat.completions.create(**kwargs)
                 return resp.choices[0].message
             except Exception as exc:
                 last_exc = exc
                 if _is_rate_limit(exc) and n > 1:
+                    prev = self._idx
                     self._idx = (self._idx + 1) % n
                     self.on_notice(
-                        f"API key #{(self._idx) or n} was rate-limited; "
-                        f"switching to key #{self._idx + 1} of {n}."
+                        f"Model {self._describe(prev)} is rate-limited; "
+                        f"switching to {self._describe(self._idx)}."
                     )
                     continue
                 raise
-        # Every key was rate-limited.
-        self.on_notice(f"All {n} API keys are rate-limited or out of quota.")
+        self.on_notice(f"All {n} model backend(s) are rate-limited or out of quota.")
         raise last_exc  # type: ignore[misc]

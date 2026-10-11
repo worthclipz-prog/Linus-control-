@@ -68,7 +68,7 @@ def test_agent_logs_in_end_to_end(browser, tmp_path):
     sent = []
 
     class FakeLLM:
-        def chat(self, messages, tools=None, tool_choice="auto", model=None):
+        def chat(self, messages, tools=None, tool_choice="auto", **kwargs):
             sent.append(json.dumps(messages))
             content, calls = script.pop(0)
             return SimpleNamespace(content=content, tool_calls=calls)

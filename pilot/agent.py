@@ -50,7 +50,7 @@ class Agent:
         self.config = config
         self.on_event = on_event or (lambda kind, text: None)
         self.llm = llm or LLM(
-            config.api_keys, config.base_url, config.model, config.temperature,
+            config.backends(), config.temperature,
             on_notice=lambda msg: self.on_event("info", msg),
         )
         self.ctx = ToolContext(config)
@@ -86,8 +86,7 @@ class Agent:
                 return "Stopped by user."
 
             use_vision = bool(self._image_msg_indices) and self._image_msg_indices[-1] == len(self.messages) - 1
-            model = self.config.vision_model if (use_vision and self.config.vision_model) else None
-            msg = self.llm.chat(self._prepared_messages(), tools=self.schemas, model=model)
+            msg = self.llm.chat(self._prepared_messages(), tools=self.schemas, prefer_vision=use_vision)
 
             tool_calls = getattr(msg, "tool_calls", None) or []
             self.messages.append(self._assistant_message(msg))

@@ -46,7 +46,31 @@ api_keys = ["key-one", "key-two", "key-three"]
 ```
 
 or in `.env`: `GEMINI_API_KEY=...`, then `PILOT_API_KEY_2=...`, `PILOT_API_KEY_3=...`.
-When one runs out, the control panel/terminal shows "switching to key #2 of 3".
+When one runs out, the control panel/terminal shows it switching to the next.
+
+### Fall back to a different provider
+
+You can also fail over to a **different provider** when the primary is exhausted —
+e.g. Gemini free tier first, then NVIDIA NIM. Add fallbacks in `config.toml`:
+
+```toml
+[model]
+provider = "gemini"
+name     = "gemini-2.0-flash"
+api_key  = "your-gemini-key"
+
+[[model.fallbacks]]
+provider = "nvidia"                               # build.nvidia.com (free tier)
+name     = "nvidia/nemotron-3.5-lightning-30b-a3b"
+api_key  = "nvapi-..."
+```
+
+Known providers: `openai`, `gemini`, `nvidia`, `openrouter`, `ollama` (or give any
+`base_url`). Pilot tries each in order on a rate-limit/quota error. **A fallback
+model must support tool calling**; if it has no vision, browser tasks still work
+(they read the page as text) but desktop-screenshot steps won't. For a single
+fallback you can use `.env` instead: `PILOT_FALLBACK_PROVIDER`,
+`PILOT_FALLBACK_MODEL`, `PILOT_FALLBACK_API_KEY`.
 
 > **Never paste an API key, password, or private key into a chat.** Keys live only in
 > your local `.env` / `config.toml` (both git-ignored) and are sent only to the model
@@ -221,7 +245,9 @@ for screenshot steps via `vision_name`.
 It's your machine, so you choose how much it asks:
 
 - By default it asks before **shell commands** and **file writes**. Answer `a` once to allow
-  everything for the session, or start with `-y` / set `auto_approve = true`.
+  everything for the session, or turn confirmations off for good: set `auto_approve = true`
+  in `config.toml`, put `PILOT_AUTO_APPROVE=true` in `.env`, or start with `-y`. Off is the
+  practical choice for unattended / phone use — it is your machine.
 - **Stop:** the Stop button in the GUI, `Ctrl+C` in the terminal, or, while it's moving your
   mouse, slam the mouse into any screen corner (emergency stop for the whole task).
 - Step limit per task: `max_steps` (default 40).

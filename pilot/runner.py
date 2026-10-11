@@ -125,14 +125,18 @@ class AgentRunner:
             latest = self._events[-1]["id"] if self._events else 0
         with self._queue_cv:
             queued = list(self._queue)
+        try:
+            model = self.agent.llm.active_model
+        except Exception:
+            model = self.config.model
         return {
             "running": self._busy.is_set(),
             "current_task": self._current_task,
             "queued": queued,
             "latest_event_id": latest,
             "pending": self.pending(),
-            "model": self.config.model,
-            "keys": len(self.config.api_keys),
+            "model": model,
+            "keys": len(self.config.backends()),
         }
 
     def _loop(self) -> None:
