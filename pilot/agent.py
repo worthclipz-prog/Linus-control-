@@ -36,6 +36,9 @@ When the task is complete, reply with a one or two sentence summary and no tool 
 # How many of the most recent messages keep their full tool output.
 _KEEP_FULL = 6
 _TRUNCATE_TO = 400
+# Marks an auto-captured screenshot message (so it can be pruned; user-attached
+# images carry the task text instead and are kept).
+_SCREENSHOT_PREFIX = "Screenshot from the last action:"
 
 
 class Agent:
@@ -72,20 +75,35 @@ class Agent:
         self.messages: List[Dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT.format(platform=platform_summary())}
         ]
-        self._image_msg_indices: List[int] = []
+        self._image_msg_indices: List[int] = []   # auto screenshots (pruned to latest)
+        self._user_image_indices: set = set()      # user-attached images (kept)
 
     # ------------------------------------------------------------------
-    def run(self, task: str) -> str:
-        """Run one task to completion and return the model's final summary."""
+    def run(self, task: str, images: Optional[List[str]] = None) -> str:
+        """Run one task to completion and return the model's final summary.
+
+        `images` is an optional list of data: URLs (e.g. a photo the user
+        attached from the phone); they are shown to the model with the task and
+        kept for the whole task (auto-captured screenshots get pruned, these
+        don't)."""
         self.stop_requested = False
         self._repair_history()
-        self.messages.append({"role": "user", "content": task})
+        if images:
+            content: List[Dict[str, Any]] = [{"type": "text", "text": task or "(see image)"}]
+            for url in images:
+                content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+            self.messages.append({"role": "user", "content": content})
+            self._user_image_indices.add(len(self.messages) - 1)
+        else:
+            self.messages.append({"role": "user", "content": task})
 
         for step in range(1, self.config.max_steps + 1):
             if self.stop_requested:
                 return "Stopped by user."
 
-            use_vision = bool(self._image_msg_indices) and self._image_msg_indices[-1] == len(self.messages) - 1
+            last = len(self.messages) - 1
+            use_vision = (bool(self._image_msg_indices) and self._image_msg_indices[-1] == last) \
+                or (last in self._user_image_indices)
             msg = self.llm.chat(self._prepared_messages(), tools=self.schemas, prefer_vision=use_vision)
 
             tool_calls = getattr(msg, "tool_calls", None) or []
@@ -107,11 +125,11 @@ class Agent:
                     images.append(result.image_png)
 
             if images:
-                content: List[Dict[str, Any]] = [{"type": "text", "text": "Screenshot from the last action:"}]
+                shot: List[Dict[str, Any]] = [{"type": "text", "text": _SCREENSHOT_PREFIX}]
                 for png in images:
                     url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
-                    content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
-                self.messages.append({"role": "user", "content": content})
+                    shot.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+                self.messages.append({"role": "user", "content": shot})
                 self._image_msg_indices.append(len(self.messages) - 1)
 
         return f"Stopped after reaching the step limit ({self.config.max_steps})."
@@ -185,8 +203,17 @@ class Agent:
                     repaired.append({"role": "tool", "tool_call_id": call["id"], "content": "Interrupted."})
         if len(repaired) != len(self.messages):
             self.messages = repaired
-            self._image_msg_indices = [i for i, m in enumerate(self.messages)
-                                       if m["role"] == "user" and isinstance(m["content"], list)]
+            # Re-derive image indices after the shift, keeping screenshots and
+            # user-attached images apart (only screenshots get pruned later).
+            self._image_msg_indices = []
+            self._user_image_indices = set()
+            for i, m in enumerate(self.messages):
+                if m["role"] == "user" and isinstance(m["content"], list):
+                    first = (m["content"][0].get("text", "") if m["content"] else "")
+                    if first.startswith(_SCREENSHOT_PREFIX):
+                        self._image_msg_indices.append(i)
+                    else:
+                        self._user_image_indices.add(i)
 
     def _prepared_messages(self) -> List[Dict[str, Any]]:
         """History with old screenshots dropped and old tool output trimmed."""

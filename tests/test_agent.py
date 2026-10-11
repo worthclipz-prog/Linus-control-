@@ -202,3 +202,29 @@ def test_gemini_thought_signature_is_echoed_back():
     assistant_msgs = [m for m in sent[-1] if m["role"] == "assistant"]
     assert assistant_msgs[0]["tool_calls"][0]["thought_signature"] == "SIG-ABC"
     assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_1"
+
+
+def test_user_images_become_multimodal_message():
+    agent, llm = make_agent([("looks like a cat", None)])
+    agent.run("what is this?", images=["data:image/jpeg;base64,AAA", "data:image/png;base64,BBB"])
+    user_msgs = [m for m in llm.sent[-1] if m["role"] == "user"]
+    content = user_msgs[0]["content"]
+    assert content[0] == {"type": "text", "text": "what is this?"}
+    urls = [p["image_url"]["url"] for p in content if p["type"] == "image_url"]
+    assert urls == ["data:image/jpeg;base64,AAA", "data:image/png;base64,BBB"]
+
+
+def test_user_image_is_kept_while_screenshots_are_pruned():
+    shots = iter([b"shot-one", b"shot-two"])
+    agent, llm = make_agent(
+        [
+            (None, [_call(1, "screen_screenshot")]),
+            (None, [_call(2, "screen_screenshot")]),
+            ("done", None),
+        ],
+    )
+    agent.tools["screen_screenshot"].handler = lambda: ToolResult("shot", next(shots))
+    agent.run("find the thing in this photo", images=["data:image/jpeg;base64,USERIMG"])
+    last = json.dumps(llm.sent[-1])
+    assert "USERIMG" in last                 # the user's photo is still there
+    assert "(older screenshot omitted)" in last  # but an old screenshot was pruned

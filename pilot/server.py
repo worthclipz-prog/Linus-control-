@@ -46,6 +46,12 @@ PAGE = """<!doctype html>
   #task { flex: 1; padding: 11px; background: #0b0f17; color: #e5e9f0; }
   button { padding: 11px 14px; background: #2d6cf6; color: #fff; border: none; }
   button.stop { background: #b4353a; } button:disabled { opacity: .5; }
+  #attach { background: #2a3550; padding: 11px 10px; }
+  #thumbs { position: fixed; bottom: 60px; left: 0; right: 0; display: flex; gap: 6px; padding: 0 12px; flex-wrap: wrap; }
+  #thumbs .t { position: relative; }
+  #thumbs img { height: 54px; border-radius: 6px; border: 1px solid #2a3550; }
+  #thumbs .x { position: absolute; top: -6px; right: -6px; background: #b4353a; color: #fff;
+               border-radius: 50%; width: 20px; height: 20px; line-height: 20px; text-align: center; font-size: 13px; }
   #prompt { display: none; padding: 12px 16px; background: #2a2140; border-bottom: 1px solid #4a3a7a; position: sticky; top: 49px; }
   #prompt .q { margin-bottom: 8px; } #prompt .row { display: flex; gap: 8px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a556b; }
@@ -56,7 +62,10 @@ PAGE = """<!doctype html>
   <div class="row"><input id="promptInput" placeholder="your answer"><button id="promptSend">Send</button></div>
 </div>
 <div id="log"></div>
+<div id="thumbs"></div>
 <footer>
+  <input type="file" id="file" accept="image/*" multiple style="display:none">
+  <button id="attach" title="Attach image">+Img</button>
   <input id="task" placeholder="Tell Pilot what to do..." autocomplete="off">
   <button id="send">Run</button><button class="stop" id="stop">Stop</button>
 </footer>
@@ -112,9 +121,39 @@ async function sendAnswer(){
   inp.value=''; curPrompt=null; document.getElementById('prompt').style.display='none'; poll();
 }
 document.getElementById('promptSend').onclick = sendAnswer;
+let pendingImages = [];
+function renderThumbs(){
+  const box = document.getElementById('thumbs'); box.innerHTML = '';
+  pendingImages.forEach((url, i) => {
+    const d = document.createElement('div'); d.className = 't';
+    d.innerHTML = '<img src="'+url+'"><div class="x">x</div>';
+    d.querySelector('.x').onclick = () => { pendingImages.splice(i,1); renderThumbs(); };
+    box.appendChild(d);
+  });
+}
+function downscale(file){
+  return new Promise(res => {
+    const img = new Image(); const r = new FileReader();
+    r.onload = () => { img.onload = () => {
+      const max = 1280; let {width:w, height:h} = img;
+      if(Math.max(w,h) > max){ const s = max/Math.max(w,h); w = Math.round(w*s); h = Math.round(h*s); }
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      res(c.toDataURL('image/jpeg', 0.82));
+    }; img.src = r.result; };
+    r.readAsDataURL(file);
+  });
+}
+document.getElementById('attach').onclick = () => document.getElementById('file').click();
+document.getElementById('file').onchange = async (e) => {
+  for(const f of e.target.files){ if(pendingImages.length >= 4) break; pendingImages.push(await downscale(f)); }
+  e.target.value = ''; renderThumbs();
+};
 document.getElementById('send').onclick = async () => {
-  const t = document.getElementById('task'); if(!t.value.trim()) return;
-  await api('/api/task', {method:'POST', body: JSON.stringify({task: t.value})}); t.value=''; poll();
+  const t = document.getElementById('task');
+  if(!t.value.trim() && !pendingImages.length) return;
+  await api('/api/task', {method:'POST', body: JSON.stringify({task: t.value, images: pendingImages})});
+  t.value=''; pendingImages = []; renderThumbs(); poll();
 };
 document.getElementById('task').addEventListener('keydown', e => { if(e.key==='Enter') document.getElementById('send').click(); });
 document.getElementById('stop').onclick = () => api('/api/stop', {method:'POST'});
@@ -163,6 +202,9 @@ def _make_handler(runner: AgentRunner, token: str):
             length = int(self.headers.get("Content-Length", 0))
             if not length:
                 return {}
+            if length > 25 * 1024 * 1024:  # 25 MB guard (a few downscaled images)
+                self.rfile.read(min(length, 1024))
+                return {}
             try:
                 return json.loads(self.rfile.read(length) or b"{}")
             except json.JSONDecodeError:
@@ -192,10 +234,14 @@ def _make_handler(runner: AgentRunner, token: str):
             if not self._token_ok():
                 return self._json({"error": "unauthorized"}, 401)
             if path == "/api/task":
-                task = str(self._read_json().get("task", "")).strip()
-                if not task:
+                data = self._read_json()
+                task = str(data.get("task", "")).strip()
+                images = data.get("images") or []
+                # Keep only a few data: image URLs (the dashboard already downscales).
+                images = [u for u in images if isinstance(u, str) and u.startswith("data:image/")][:4]
+                if not task and not images:
                     return self._json({"error": "empty task"}, 400)
-                runner.submit(task)
+                runner.submit(task, images)
                 return self._json({"ok": True})
             if path == "/api/answer":
                 data = self._read_json()

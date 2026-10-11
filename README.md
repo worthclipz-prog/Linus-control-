@@ -114,7 +114,8 @@ More options: `pilot --help`. More example tasks: [`examples/tasks.md`](examples
 
 `pilot --serve` starts a small web control panel on the machine Pilot runs on. From
 your phone's browser you can watch, live, everything Pilot is doing, send it tasks,
-answer its questions (2-factor codes, confirmations) and stop it.
+attach images to a task (tap **+Img** to send a photo or screenshot — the model sees
+it), answer its questions (2-factor codes, confirmations) and stop it.
 
 ```bash
 pilot --serve --host 0.0.0.0 --port 8080

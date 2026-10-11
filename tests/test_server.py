@@ -28,8 +28,8 @@ class FakeRunner:
         return {"running": False, "current_task": None, "queued": [], "latest_event_id": 1,
                 "pending": self._pending, "model": "gemini-2.0-flash", "keys": 2}
 
-    def submit(self, task):
-        self.tasks.append(task)
+    def submit(self, task, images=None):
+        self.tasks.append((task, images or []))
 
     def stop(self):
         self.stopped = True
@@ -103,7 +103,7 @@ def test_state_endpoint(server):
 def test_submit_task_and_stop(server):
     base, runner = server
     assert post(base + "/api/task?token=secret-token", {"task": "open youtube"}) == (200, {"ok": True})
-    assert runner.tasks == ["open youtube"]
+    assert runner.tasks == [("open youtube", [])]
     post(base + "/api/stop?token=secret-token", {})
     assert runner.stopped is True
 
@@ -147,3 +147,19 @@ def test_runner_prompt_roundtrip():
     assert runner.answer(p["id"], True) is True
     t.join(timeout=2)
     assert result["ok"] is True
+
+
+def test_task_with_images_forwarded(server):
+    base, runner = server
+    img = "data:image/jpeg;base64,/9j/abc123"
+    post(base + "/api/task?token=secret-token", {"task": "what is this?", "images": [img, "not-an-image"]})
+    task, images = runner.tasks[-1]
+    assert task == "what is this?"
+    assert images == [img]  # the non-data URL was filtered out
+
+
+def test_image_only_task_allowed(server):
+    base, runner = server
+    img = "data:image/png;base64,AAAA"
+    assert post(base + "/api/task?token=secret-token", {"task": "", "images": [img]}) == (200, {"ok": True})
+    assert runner.tasks[-1] == ("", [img])

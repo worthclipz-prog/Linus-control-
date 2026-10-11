@@ -45,7 +45,7 @@ class AgentRunner:
         self._pending_seq = 0
         self._current_task: Optional[str] = None
         self._busy = threading.Event()
-        self._queue: "list[str]" = []
+        self._queue: "list[tuple]" = []   # (task, images)
         self._queue_cv = threading.Condition()
         self._closed = False
 
@@ -110,9 +110,9 @@ class AgentRunner:
         return True
 
     # --- task queue ----------------------------------------------------
-    def submit(self, task: str) -> None:
+    def submit(self, task: str, images: Optional[list] = None) -> None:
         with self._queue_cv:
-            self._queue.append(task)
+            self._queue.append((task, images or []))
             self._queue_cv.notify()
 
     def stop(self) -> None:
@@ -124,7 +124,7 @@ class AgentRunner:
         with self._lock:
             latest = self._events[-1]["id"] if self._events else 0
         with self._queue_cv:
-            queued = list(self._queue)
+            queued = [t for (t, _imgs) in self._queue]
         try:
             model = self.agent.llm.active_model
         except Exception:
@@ -146,13 +146,13 @@ class AgentRunner:
                     self._queue_cv.wait()
                 if self._closed:
                     return
-                task = self._queue.pop(0)
+                task, images = self._queue.pop(0)
             self._busy.set()
             self._current_task = task
             self.agent.stop_requested = False
-            self._record("task", task)
+            self._record("task", task + (f"  [{len(images)} image(s)]" if images else ""))
             try:
-                result = self.agent.run(task)
+                result = self.agent.run(task, images=images)
                 self._record("say", result)
             except Exception as exc:
                 self._record("info", f"error: {type(exc).__name__}: {exc}")
