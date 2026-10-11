@@ -1,0 +1,14 @@
+# Your keys and passwords -- never commit these
+.env
+config.toml
+browser-profile/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/

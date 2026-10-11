@@ -1,0 +1,40 @@
+# Copy to config.toml and edit. config.toml is git-ignored.
+# Environment variables (and .env) override anything set here.
+
+[model]
+# api_key = "sk-..."                       # or set OPENAI_API_KEY
+base_url = "https://api.openai.com/v1"      # any OpenAI-compatible server works
+name = "gpt-4o"                             # must support tool calling + images
+# vision_name = "gpt-4o"                    # optional: different model for screenshot steps
+temperature = 0.0
+max_steps = 40
+
+# Local model instead of the OpenAI API (no per-call cost), e.g. Ollama:
+#   base_url = "http://localhost:11434/v1"
+#   name = "qwen2.5vl:7b"
+
+[behaviour]
+auto_approve = false   # true = run shell commands / file writes without asking
+
+[browser]
+engine = "chromium"              # chromium | firefox | webkit
+# channel = "chrome"             # drive your installed Chrome ("msedge" for Edge)
+# Any other Chromium-based browser: point at its executable (engine stays "chromium").
+#   Windows Brave: executable_path = 'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
+#   Linux Brave:   executable_path = "/usr/bin/brave-browser"
+# For Firefox: engine = "firefox" (uses Playwright's patched Firefox build).
+headless = false
+user_data_dir = "browser-profile" # keeps cookies and logins between runs
+viewport_width = 1280
+viewport_height = 800
+nav_timeout_ms = 30000
+
+# Logins the agent can use. The model refers to them by name only and
+# never sees the values.
+[secrets.gmail]
+username = "you@gmail.com"
+password = "change-me"
+
+# [secrets.github]
+# username = "you"
+# password = "change-me"
