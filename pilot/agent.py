@@ -48,11 +48,14 @@ class Agent:
         on_event: Optional[Callable[[str, str], None]] = None,
     ) -> None:
         self.config = config
-        self.llm = llm or LLM(config.api_key, config.base_url, config.model, config.temperature)
+        self.on_event = on_event or (lambda kind, text: None)
+        self.llm = llm or LLM(
+            config.api_keys, config.base_url, config.model, config.temperature,
+            on_notice=lambda msg: self.on_event("info", msg),
+        )
         self.ctx = ToolContext(config)
         self.confirm = confirm or (lambda name, args: True)
         self.ask_user = ask_user or (lambda q: "")
-        self.on_event = on_event or (lambda kind, text: None)
         self.stop_requested = False
 
         tools = build_tools(self.ctx)

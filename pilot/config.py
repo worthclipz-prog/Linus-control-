@@ -17,7 +17,15 @@ import os
 import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+# Known OpenAI-compatible endpoints, selectable with [model] provider = "...".
+PROVIDER_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "ollama": "http://localhost:11434/v1",
+}
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -54,9 +62,18 @@ class BrowserConfig:
 
 
 @dataclass
+class ServerConfig:
+    host: str = "127.0.0.1"   # bind address; use 0.0.0.0 to reach it from your phone
+    port: int = 8080
+    token: str = ""           # required on every request; auto-generated if blank
+
+
+@dataclass
 class Config:
     # --- model / brain ---
     api_key: str = ""
+    # Extra keys to fail over to when the active one is rate-limited / out of quota.
+    extra_api_keys: List[str] = field(default_factory=list)
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o"
     # Optional separate model for vision-only "look at the screen" steps.
@@ -66,15 +83,28 @@ class Config:
 
     # --- behaviour ---
     # When False, destructive/irreversible actions (shell, file writes) ask
-    # for confirmation at the terminal first.
+    # for confirmation first.
     auto_approve: bool = False
 
     browser: BrowserConfig = field(default_factory=BrowserConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
 
     # name -> {"username": ..., "password": ..., "value": ...}
     secrets: Dict[str, Dict[str, str]] = field(default_factory=dict)
 
     config_dir: Path = field(default_factory=Path.cwd)
+
+    @property
+    def api_keys(self) -> List[str]:
+        """All usable keys, primary first, for rotation on rate limits."""
+        keys = [self.api_key, *self.extra_api_keys]
+        seen, out = set(), []
+        for k in keys:
+            k = (k or "").strip()
+            if k and k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
 
     def secret(self, name: str) -> Dict[str, str]:
         if name not in self.secrets:
@@ -87,7 +117,9 @@ class Config:
     def redacted(self) -> Dict[str, Any]:
         d = asdict(self)
         d["api_key"] = "***" if self.api_key else ""
+        d["extra_api_keys"] = ["***"] * len(self.extra_api_keys)
         d["secrets"] = {k: {kk: "***" for kk in v} for k, v in self.secrets.items()}
+        d["server"]["token"] = "***" if self.server.token else ""
         d["config_dir"] = str(self.config_dir)
         return d
 
@@ -113,14 +145,31 @@ def load_config(path: Optional[str] = None, overrides: Optional[Dict[str, Any]] 
 
     model_tbl = data.get("model", {})
     cfg.api_key = model_tbl.get("api_key", cfg.api_key)
+    if "api_keys" in model_tbl:  # a list: first is primary, rest are fallbacks
+        keys = [str(k) for k in model_tbl["api_keys"] if str(k).strip()]
+        if keys:
+            cfg.api_key, cfg.extra_api_keys = keys[0], keys[1:]
     cfg.base_url = model_tbl.get("base_url", cfg.base_url)
     cfg.model = model_tbl.get("name", cfg.model)
     cfg.vision_model = model_tbl.get("vision_name", cfg.vision_model)
     cfg.temperature = float(model_tbl.get("temperature", cfg.temperature))
     cfg.max_steps = int(model_tbl.get("max_steps", cfg.max_steps))
+    # provider = "gemini" picks the endpoint for you (unless base_url is set explicitly).
+    provider = model_tbl.get("provider")
+    if provider and "base_url" not in model_tbl and "PILOT_BASE_URL" not in os.environ:
+        if provider not in PROVIDER_BASE_URLS:
+            raise ValueError(f"Unknown provider {provider!r}. Known: {sorted(PROVIDER_BASE_URLS)}")
+        cfg.base_url = PROVIDER_BASE_URLS[provider]
 
     beh = data.get("behaviour", {})
     cfg.auto_approve = _coerce_bool(beh.get("auto_approve"), cfg.auto_approve)
+
+    srv = data.get("server", {})
+    cfg.server = ServerConfig(
+        host=srv.get("host", cfg.server.host),
+        port=int(srv.get("port", cfg.server.port)),
+        token=str(srv.get("token", cfg.server.token)),
+    )
 
     br = data.get("browser", {})
     cfg.browser = BrowserConfig(
@@ -142,9 +191,23 @@ def load_config(path: Optional[str] = None, overrides: Optional[Dict[str, Any]] 
             cfg.secrets[name] = {"value": str(val)}
 
     # --- environment overrides ---
-    cfg.api_key = os.environ.get("OPENAI_API_KEY", os.environ.get("PILOT_API_KEY", cfg.api_key))
+    cfg.api_key = os.environ.get(
+        "OPENAI_API_KEY", os.environ.get("GEMINI_API_KEY", os.environ.get("PILOT_API_KEY", cfg.api_key))
+    )
+    # PILOT_API_KEYS: comma-separated list (primary first, rest are fallbacks).
+    if os.environ.get("PILOT_API_KEYS"):
+        keys = [k.strip() for k in os.environ["PILOT_API_KEYS"].split(",") if k.strip()]
+        if keys:
+            cfg.api_key, cfg.extra_api_keys = keys[0], keys[1:]
+    # PILOT_API_KEY_2, _3, ... append fallback keys.
+    for i in range(2, 21):
+        extra = os.environ.get(f"PILOT_API_KEY_{i}")
+        if extra and extra.strip() and extra.strip() not in cfg.extra_api_keys:
+            cfg.extra_api_keys.append(extra.strip())
     cfg.base_url = os.environ.get("PILOT_BASE_URL", os.environ.get("OPENAI_BASE_URL", cfg.base_url))
     cfg.model = os.environ.get("PILOT_MODEL", cfg.model)
+    if os.environ.get("PILOT_SERVER_TOKEN"):
+        cfg.server.token = os.environ["PILOT_SERVER_TOKEN"]
     if os.environ.get("PILOT_VISION_MODEL"):
         cfg.vision_model = os.environ["PILOT_VISION_MODEL"]
     if os.environ.get("PILOT_BROWSER_PATH"):

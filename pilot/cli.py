@@ -87,10 +87,11 @@ def doctor(cfg) -> int:
         _row("ok", "display", "available")
     else:
         _row("warn", "display", "none -- desktop control disabled, browser can run headless")
-    if cfg.api_key:
-        _row("ok", "api key", "set")
+    n_keys = len(cfg.api_keys)
+    if n_keys:
+        _row("ok", "api key", f"{n_keys} key(s) set" + (" (with failover)" if n_keys > 1 else ""))
     else:
-        _row("warn", "api key", "not set (fine for local models, required for OpenAI)")
+        _row("warn", "api key", "not set (fine for local models, required for hosted APIs)")
     print(f"  model={cfg.model}  base_url={cfg.base_url}")
     print(f"  secrets: {', '.join(sorted(cfg.secrets)) or '(none)'}")
     return 0 if ok else 1
@@ -113,9 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("task", nargs="*", help="what you want done")
     p.add_argument("-i", "--interactive", action="store_true", help="chat mode, keeps context between tasks")
     p.add_argument("--gui", action="store_true", help="open the desktop window")
+    p.add_argument("--serve", action="store_true", help="run the web control panel (drive it from your phone)")
+    p.add_argument("--host", help="server bind address (use 0.0.0.0 to reach it over the network)")
+    p.add_argument("--port", type=int, help="server port (default 8080)")
+    p.add_argument("--token", help="server access token (auto-generated if omitted)")
     p.add_argument("--doctor", action="store_true", help="check installation and exit")
     p.add_argument("--config", help="path to config.toml")
-    p.add_argument("--model", help="model name, e.g. gpt-4o")
+    p.add_argument("--model", help="model name, e.g. gpt-4o or gemini-2.0-flash")
     p.add_argument("--base-url", dest="base_url", help="OpenAI-compatible endpoint")
     p.add_argument("-y", "--yes", dest="auto_approve", action="store_true", default=None,
                    help="never ask for confirmation before shell commands / file writes")
@@ -137,12 +142,22 @@ def main(argv=None) -> int:
         "model", "base_url", "auto_approve", "max_steps", "engine", "channel", "executable_path",
         "user_data_dir", "headless")}
     cfg = load_config(args.config, overrides)
+    if args.host is not None:
+        cfg.server.host = args.host
+    if args.port is not None:
+        cfg.server.port = args.port
+    if args.token is not None:
+        cfg.server.token = args.token
 
     if args.print_config:
         print(json.dumps(cfg.redacted(), indent=2))
         return 0
     if args.doctor:
         return doctor(cfg)
+    if args.serve:
+        from .server import run_server
+
+        return run_server(cfg)
     if args.gui:
         from .gui import run_gui
 
