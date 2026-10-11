@@ -168,3 +168,37 @@ def test_cli_always_answer_stops_prompting(monkeypatch):
     monkeypatch.setattr(cli._confirm, "always", False, raising=False)
     assert cli._confirm("shell", {"command": "ls"}) is True
     assert cli._confirm("shell", {"command": "pwd"}) is True  # no second prompt (iterator is empty)
+
+
+def test_gemini_thought_signature_is_echoed_back():
+    """Provider extras on a tool call (Gemini's thought_signature) must survive into the next request."""
+    tc = SimpleNamespace(id="call_1", type="function",
+                         function=SimpleNamespace(name="list_secrets", arguments="{}"))
+
+    class GeminiMsg:
+        content = None
+        tool_calls = [tc]
+
+        def model_dump(self, exclude_none=False):
+            return {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "thought_signature": "SIG-ABC",
+                    "function": {"name": "list_secrets", "arguments": "{}"},
+                }],
+            }
+
+    script = [GeminiMsg(), SimpleNamespace(content="done", tool_calls=None)]
+    sent = []
+
+    class FakeLLM:
+        def chat(self, messages, tools=None, tool_choice="auto", model=None):
+            sent.append(json.loads(json.dumps(messages)))
+            return script.pop(0)
+
+    agent = Agent(Config(), llm=FakeLLM())
+    assert agent.run("check secrets") == "done"
+    assistant_msgs = [m for m in sent[-1] if m["role"] == "assistant"]
+    assert assistant_msgs[0]["tool_calls"][0]["thought_signature"] == "SIG-ABC"
+    assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_1"

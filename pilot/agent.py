@@ -89,18 +89,8 @@ class Agent:
             model = self.config.vision_model if (use_vision and self.config.vision_model) else None
             msg = self.llm.chat(self._prepared_messages(), tools=self.schemas, model=model)
 
-            assistant: Dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
             tool_calls = getattr(msg, "tool_calls", None) or []
-            if tool_calls:
-                assistant["tool_calls"] = [
-                    {
-                        "id": c.id,
-                        "type": "function",
-                        "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"},
-                    }
-                    for c in tool_calls
-                ]
-            self.messages.append(assistant)
+            self.messages.append(self._assistant_message(msg))
 
             if not tool_calls:
                 return msg.content or "Done."
@@ -129,6 +119,35 @@ class Agent:
 
     def close(self) -> None:
         self.ctx.close()
+
+    @staticmethod
+    def _assistant_message(msg: Any) -> Dict[str, Any]:
+        """Serialize the model's reply for the history, preserving provider-specific
+        fields. Gemini attaches a `thought_signature` to each tool call and rejects
+        the next request (HTTP 400) unless it is echoed back, so we round-trip the
+        raw message rather than rebuilding it from id/name/arguments alone."""
+        dump = getattr(msg, "model_dump", None)
+        if callable(dump):
+            try:
+                data = dump(exclude_none=True)
+                data["role"] = "assistant"
+                data.setdefault("content", getattr(msg, "content", None))
+                return data
+            except Exception:
+                pass
+        # Fallback for plain objects (e.g. the test doubles).
+        assistant: Dict[str, Any] = {"role": "assistant", "content": getattr(msg, "content", "") or ""}
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if tool_calls:
+            assistant["tool_calls"] = [
+                {
+                    "id": c.id,
+                    "type": "function",
+                    "function": {"name": c.function.name, "arguments": c.function.arguments or "{}"},
+                }
+                for c in tool_calls
+            ]
+        return assistant
 
     # ------------------------------------------------------------------
     def _execute(self, name: str, raw_args: Optional[str]) -> ToolResult:
