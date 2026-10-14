@@ -228,3 +228,92 @@ def test_user_image_is_kept_while_screenshots_are_pruned():
     last = json.dumps(llm.sent[-1])
     assert "USERIMG" in last                 # the user's photo is still there
     assert "(older screenshot omitted)" in last  # but an old screenshot was pruned
+
+
+# --- robustness for small / local models ---
+
+def test_text_protocol_action_is_parsed_and_run():
+    """A model that writes the action as JSON text (no native tool_calls) still works."""
+    seen = []
+    agent, llm = make_agent([
+        (' Sure, let me do that.\n{"tool": "list_secrets", "arguments": {}}', None),
+        ("All done.", None),
+    ], secrets={"gmail": {"username": "u", "password": "p"}})
+    orig = agent.tools["list_secrets"].handler
+    agent.tools["list_secrets"].handler = lambda: seen.append(1) or orig()
+    assert agent.run("what secrets") == "All done."
+    assert seen == [1]
+    # the tool result was fed back as a normal user message (no tool role needed)
+    roles = [m["role"] for m in llm.sent[-1]]
+    assert "tool" not in roles
+    assert any(isinstance(m["content"], str) and "Result of list_secrets" in m["content"]
+               for m in llm.sent[-1] if m["role"] == "user")
+
+
+def test_text_protocol_in_code_fence():
+    agent, _ = make_agent([
+        ('```json\n{"name": "list_secrets", "parameters": {}}\n```', None),
+        ("done", None),
+    ])
+    assert agent.run("x") == "done"
+
+
+def test_plain_json_answer_is_not_mistaken_for_an_action():
+    # JSON with no tool/name/action key is a normal final answer, not a tool call.
+    agent, _ = make_agent([('{"result": 42, "status": "ok"}', None)])
+    out = agent.run("give me json")
+    assert "result" in out
+
+
+def test_arg_aliases_and_type_coercion():
+    agent, _ = make_agent([(None, [_call(1, "browser_scroll", pixels="300")]), ("done", None)])
+    calls = []
+    agent.tools["browser_scroll"].handler = lambda dy=600: calls.append(dy) or ToolResult(f"scrolled {dy}")
+    agent.run("scroll down")
+    assert calls == [300]  # 'pixels' -> 'dy', "300" -> 300 (int)
+
+
+def test_hotkey_string_becomes_list():
+    agent, _ = make_agent([(None, [_call(1, "keyboard_hotkey", keys="ctrl+c")]), ("done", None)])
+    got = []
+    agent.tools["keyboard_hotkey"].handler = lambda keys: got.append(keys) or ToolResult("ok")
+    agent.run("copy")
+    assert got == [["ctrl", "c"]]
+
+
+def test_unknown_args_are_dropped_not_crashed():
+    agent, _ = make_agent([(None, [_call(1, "list_secrets", bogus="x", extra=1)]), ("done", None)])
+    assert agent.run("x") == "done"  # extra args ignored, no crash
+
+
+def test_missing_required_arg_gives_helpful_feedback():
+    agent, llm = make_agent([(None, [_call(1, "browser_goto")]), ("ok", None)])
+    agent.run("go")
+    tool_msg = [m for m in llm.sent[-1] if m["role"] == "tool"][0]["content"]
+    assert "needs these arguments" in tool_msg and "url" in tool_msg
+
+
+def test_lenient_json_in_native_arguments():
+    # single quotes + trailing comma in the arguments string
+    bad = SimpleNamespace(id="c1", function=SimpleNamespace(name="browser_goto",
+                          arguments="{'url': 'example.com',}"))
+    got = []
+    agent, _ = make_agent([(None, [bad]), ("done", None)])
+    agent.tools["browser_goto"].handler = lambda url: got.append(url) or ToolResult("ok")
+    agent.run("go")
+    assert got == ["example.com"]
+
+
+def test_fuzzy_tool_name_resolves():
+    agent, _ = make_agent([('{"tool": "List Secrets", "arguments": {}}', None), ("done", None)])
+    assert agent.run("x") == "done"  # "List Secrets" -> list_secrets
+
+
+def test_repeat_guard_nudges():
+    agent, llm = make_agent(
+        [(None, [_call(i, "list_secrets")]) for i in range(1, 5)] + [("stop", None)],
+        max_steps=6,
+    )
+    agent.run("loop")
+    joined = " ".join(m["content"] for m in llm.sent[-1] if m["role"] == "tool")
+    assert "same call" in joined

@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Callable, Dict, List, Optional
+import re
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import Config
 from .llm import LLM
@@ -31,7 +32,79 @@ Speed rules:
 Logins: stored credentials are available by name (see list_secrets). Fill them with browser_fill_secret or keyboard_type_secret; you never see the values and must not ask for them.
 If a site asks for a one-time code, a CAPTCHA, or approval on another device, call ask_user and wait for the user.
 
-When the task is complete, reply with a one or two sentence summary and no tool call."""
+Make ONE tool call per turn. When the task is complete, reply with a one or two sentence summary and no tool call.
+
+If you cannot call a tool through the function interface, reply with ONLY a single JSON object and nothing else:
+{{"tool": "<tool_name>", "arguments": {{ ... }}}}"""
+
+# Common wrong argument names small models use, mapped to the real one.
+_ARG_ALIASES: Dict[str, List[str]] = {
+    "url": ["link", "address", "href", "website", "site"],
+    "ref": ["index", "element", "element_id", "elementId", "idx", "ref_id", "number"],
+    "text": ["content", "value", "input", "string", "query"],
+    "command": ["cmd", "bash", "shell", "script"],
+    "path": ["file", "filename", "filepath", "file_path"],
+    "name": ["secret", "secret_name", "credential"],
+    "field": ["part"],
+    "question": ["prompt", "message", "msg"],
+    "keys": ["key", "hotkey", "combo"],
+    "amount": ["delta", "distance", "pixels"],
+    "dy": ["delta", "distance", "pixels", "amount"],
+    "seconds": ["duration", "secs", "time"],
+    "x": ["X", "pos_x", "left"],
+    "y": ["Y", "pos_y", "top"],
+}
+
+
+def _loads_lenient(s: Any) -> Any:
+    """Parse JSON that small models often get slightly wrong (single quotes,
+    trailing commas, surrounding prose)."""
+    if isinstance(s, (dict, list)):
+        return s
+    if not isinstance(s, str):
+        return {}
+    s = s.strip()
+    if not s:
+        return {}
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    i, j = s.find("{"), s.rfind("}")
+    if i != -1 and j > i:
+        sub = s[i:j + 1]
+        for attempt in (sub,
+                        re.sub(r",\s*([}\]])", r"\1", sub),
+                        re.sub(r"'", '"', sub),
+                        re.sub(r",\s*([}\]])", r"\1", re.sub(r"'", '"', sub))):
+            try:
+                return json.loads(attempt)
+            except Exception:
+                continue
+    return {}
+
+
+def _coerce_type(val: Any, spec: Dict[str, Any]) -> Any:
+    t = spec.get("type")
+    try:
+        if t == "integer":
+            return int(float(str(val).strip()))
+        if t == "number":
+            return float(str(val).strip())
+        if t == "boolean":
+            if isinstance(val, bool):
+                return val
+            return str(val).strip().lower() in ("1", "true", "yes", "on")
+        if t == "array":
+            if isinstance(val, list):
+                return val
+            parts = re.split(r"[+\s,]+", str(val).strip())
+            return [p for p in parts if p]
+        if t == "string" and not isinstance(val, str):
+            return str(val)
+    except (ValueError, TypeError):
+        return val
+    return val
 
 # How many of the most recent messages keep their full tool output.
 _KEEP_FULL = 6
@@ -77,6 +150,8 @@ class Agent:
         ]
         self._image_msg_indices: List[int] = []   # auto screenshots (pruned to latest)
         self._user_image_indices: set = set()      # user-attached images (kept)
+        self._last_sig: Optional[str] = None       # repeat-action guard
+        self._repeat = 0
 
     # ------------------------------------------------------------------
     def run(self, task: str, images: Optional[List[str]] = None) -> str:
@@ -109,28 +184,39 @@ class Agent:
             tool_calls = getattr(msg, "tool_calls", None) or []
             self.messages.append(self._assistant_message(msg))
 
-            if not tool_calls:
+            if tool_calls:
+                if msg.content:
+                    self.on_event("say", msg.content)
+                images: List[bytes] = []
+                for call in tool_calls:
+                    if self.stop_requested:
+                        result = ToolResult("Skipped: stopped by user.")
+                    else:
+                        result = self._execute(call.function.name, _loads_lenient(call.function.arguments))
+                    self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result.text})
+                    if result.image_png:
+                        images.append(result.image_png)
+                self._attach_screenshots(images)
+                continue
+
+            # No native tool call. Many small local models can't use the function
+            # API and instead write the action as JSON in the text -- parse that.
+            parsed = self._parse_text_action(msg.content)
+            if parsed is None:
                 return msg.content or "Done."
-            if msg.content:
-                self.on_event("say", msg.content)
-
-            images: List[bytes] = []
-            for call in tool_calls:
-                if self.stop_requested:
-                    result = ToolResult("Skipped: stopped by user.")
-                else:
-                    result = self._execute(call.function.name, call.function.arguments)
-                self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result.text})
-                if result.image_png:
-                    images.append(result.image_png)
-
-            if images:
-                shot: List[Dict[str, Any]] = [{"type": "text", "text": _SCREENSHOT_PREFIX}]
-                for png in images:
-                    url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
-                    shot.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
-                self.messages.append({"role": "user", "content": shot})
+            name, args = parsed
+            if self.stop_requested:
+                return "Stopped by user."
+            result = self._execute(name, args)
+            feedback = f"Result of {name}:\n{result.text}"
+            if result.image_png:
+                url = "data:image/png;base64," + base64.b64encode(result.image_png).decode("ascii")
+                self.messages.append({"role": "user", "content": [
+                    {"type": "text", "text": feedback}, {"type": "text", "text": _SCREENSHOT_PREFIX},
+                    {"type": "image_url", "image_url": {"url": url, "detail": "high"}}]})
                 self._image_msg_indices.append(len(self.messages) - 1)
+            else:
+                self.messages.append({"role": "user", "content": feedback})
 
         return f"Stopped after reaching the step limit ({self.config.max_steps})."
 
@@ -167,28 +253,133 @@ class Agent:
         return assistant
 
     # ------------------------------------------------------------------
-    def _execute(self, name: str, raw_args: Optional[str]) -> ToolResult:
-        try:
-            args = json.loads(raw_args or "{}")
-        except json.JSONDecodeError as exc:
-            return ToolResult(f"Invalid JSON arguments for {name}: {exc}")
+    def _attach_screenshots(self, images: List[bytes]) -> None:
+        if not images:
+            return
+        shot: List[Dict[str, Any]] = [{"type": "text", "text": _SCREENSHOT_PREFIX}]
+        for png in images:
+            url = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+            shot.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+        self.messages.append({"role": "user", "content": shot})
+        self._image_msg_indices.append(len(self.messages) - 1)
 
-        tool = self.tools.get(name)
-        if tool is None:
-            return ToolResult(f"Unknown tool {name!r}.")
+    def _resolve_tool(self, name: str) -> Optional[str]:
+        """Match a tool name forgivingly: exact, case-insensitive, then ignoring
+        punctuation (so 'Browser Goto' or 'browser-goto' find 'browser_goto')."""
+        if not name:
+            return None
+        if name in self.tools:
+            return name
+        low = name.strip().lower()
+        for t in self.tools:
+            if t.lower() == low:
+                return t
+        norm = re.sub(r"[^a-z0-9]", "", low)
+        for t in self.tools:
+            if re.sub(r"[^a-z0-9]", "", t.lower()) == norm:
+                return t
+        return None
 
-        self.on_event("tool", f"{name} {json.dumps(args, ensure_ascii=False)[:200]}")
+    def _coerce_args(self, tool: Tool, args: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+        """Map aliases to real parameter names, coerce types, drop unknown keys.
+        Returns (clean_args, missing_required)."""
+        props = tool.parameters.get("properties", {})
+        required = tool.parameters.get("required", [])
+        if not isinstance(args, dict):
+            args = {}
+        lowered = {str(k).lower(): k for k in args}
+        out: Dict[str, Any] = {}
+        for prop, spec in props.items():
+            key = None
+            if prop in args:
+                key = prop
+            elif prop.lower() in lowered:
+                key = lowered[prop.lower()]
+            else:
+                for alias in _ARG_ALIASES.get(prop, []):
+                    if alias in args:
+                        key = alias
+                        break
+                    if alias.lower() in lowered:
+                        key = lowered[alias.lower()]
+                        break
+            if key is not None:
+                out[prop] = _coerce_type(args[key], spec)
+        missing = [p for p in required if p not in out]
+        return out, missing
+
+    def _parse_text_action(self, content: Optional[str]) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """Extract an action a text-only model wrote as JSON in its message."""
+        if not content:
+            return None
+        candidates: List[str] = []
+        for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.S):
+            candidates.append(m.group(1))
+        candidates.append(content)
+        i, j = content.find("{"), content.rfind("}")
+        if i != -1 and j > i:
+            candidates.append(content[i:j + 1])
+        for cand in candidates:
+            obj = _loads_lenient(cand)
+            if isinstance(obj, list) and obj and isinstance(obj[0], dict):
+                obj = obj[0]
+            if not isinstance(obj, dict):
+                continue
+            name = obj.get("tool") or obj.get("name") or obj.get("action") or obj.get("tool_name")
+            args = obj.get("arguments") or obj.get("args") or obj.get("parameters") or obj.get("input") or {}
+            fn = obj.get("function")
+            if not name and isinstance(fn, dict):
+                name = fn.get("name")
+                args = fn.get("arguments") or args
+            if isinstance(args, str):
+                args = _loads_lenient(args)
+            canon = self._resolve_tool(str(name)) if name else None
+            if canon and isinstance(args, dict):
+                return canon, args
+        return None
+
+    def _execute(self, name: str, args: Any) -> ToolResult:
+        canon = self._resolve_tool(name)
+        if canon is None:
+            return ToolResult(
+                f"Unknown tool {name!r}. Available tools: {', '.join(sorted(self.tools))}."
+            )
+        tool = self.tools[canon]
+        clean, missing = self._coerce_args(tool, args if isinstance(args, dict) else {})
+
+        self.on_event("tool", f"{canon} {json.dumps(clean, ensure_ascii=False)[:200]}")
+        if missing:
+            need = ", ".join(
+                f"{m} ({tool.parameters['properties'].get(m, {}).get('type', 'value')})" for m in missing
+            )
+            got = list(args) if isinstance(args, dict) else args
+            return ToolResult(f"{canon} needs these arguments: {need}. You sent: {got}. Call it again with them.")
+
+        # Repeat-action guard: nudge if the exact same call keeps happening.
+        sig = canon + "|" + json.dumps(clean, sort_keys=True, ensure_ascii=False)
+        self._repeat = self._repeat + 1 if sig == self._last_sig else 0
+        self._last_sig = sig
+
         if tool.needs_confirm and not self.config.auto_approve:
-            if not self.confirm(name, args):
+            if not self.confirm(canon, clean):
                 return ToolResult("The user declined this action. Try another approach or ask the user.")
         try:
-            result = tool.handler(**args)
+            result = tool.handler(**clean)
+        except TypeError as exc:
+            result = ToolResult(f"{canon} rejected those arguments ({exc}). Check the argument names and types.")
         except Exception as exc:
             if type(exc).__name__ == "FailSafeException":
                 # pyautogui's emergency stop: the user slammed the mouse into a corner.
                 self.stop_requested = True
                 return ToolResult("Emergency stop triggered by the user.")
             result = ToolResult(f"Error: {type(exc).__name__}: {exc}")
+
+        if self._repeat >= 2:
+            result = ToolResult(
+                result.text + f"\n(Note: you've made this same call {self._repeat + 1} times. "
+                "If it isn't working, try a different approach or call ask_user.)",
+                result.image_png,
+            )
         self.on_event("result", result.text[:300])
         return result
 

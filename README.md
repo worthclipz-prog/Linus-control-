@@ -33,6 +33,34 @@ longer tasks. Pick a **fast** model like `gemini-2.0-flash`. Google may use free
 data to improve its products. The exact numbers change — check your key's limits page
 in Google AI Studio.
 
+### Small / local models (LM Studio, Ollama)
+
+Small local models (e.g. Qwen3-30B) are much weaker at computer use than GPT or
+Gemini, so Pilot does extra work to keep them on the rails:
+
+- **Works even without native function-calling.** Many small models can't use the
+  tool API reliably — they write the action as JSON in their reply instead. Pilot
+  parses that (`{"tool": "...", "arguments": {...}}`, or a ```json fence), runs it,
+  and feeds the result back, so the model can drive Pilot either way.
+- **Forgiving arguments.** Wrong key names (`link`→`url`, `index`→`ref`,
+  `content`→`text`), a number sent as a string, `"ctrl+c"` instead of `["ctrl","c"]`,
+  single quotes or trailing commas in JSON, and extra/unknown keys are all fixed up
+  instead of crashing. A missing required argument gets a plain-English hint back.
+- **Fuzzy tool names** (`Browser Goto` → `browser_goto`) and a nudge when the model
+  repeats the same failing action, so it tries something else instead of looping.
+
+Point Pilot at your local server (both are OpenAI-compatible):
+
+```toml
+[model]
+provider = "ollama"          # or set base_url to your LM Studio server
+name     = "qwen3:30b"       # use a model that supports vision + tools if you can
+```
+
+LM Studio: set `base_url = "http://localhost:1234/v1"`. Expect local models to need
+simpler, shorter tasks and to make more mistakes than Gemini — browser tasks (which
+read the page as text) work better on them than desktop-screenshot tasks.
+
 ### Stack several keys (automatic failover)
 
 Give Pilot more than one key and it switches to the next one the moment a key is
