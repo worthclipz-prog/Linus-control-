@@ -133,6 +133,23 @@ screen"** — it installs and launches like an app (it's a PWA). Want a real `.a
   control. Restrict the port in your cloud firewall / security list, and use HTTPS
   (e.g. behind a reverse proxy) if you can.
 
+## Timers (scheduled tasks)
+
+Tap **Timers** in the control panel to have Pilot run a task at a set time, on its
+own, without you watching. Each timer is a task plus when to run it:
+
+- **Once** on a date at a time, **Every day** at a time, or **Every week** on a
+  weekday at a time.
+- Times are **IST** (Asia/Kolkata). Timers are saved (in `schedule.json`) and
+  survive restarts; you can pause, resume or delete them.
+
+When a timer fires, the task joins the normal queue — it never interrupts a task
+already running, and you see it appear in the live log. Scheduled runs are
+unattended, so turn **auto-approve on** (`auto_approve = true` / `PILOT_AUTO_APPROVE=true`
+/ `-y`); otherwise a task that hits a shell/file confirmation will wait for an
+answer nobody is there to give. The control panel (`pilot --serve`) must be
+running for timers to fire.
+
 ## Run on a Linux VM (no monitor)
 
 On a headless server (such as an Oracle Cloud free-tier instance), Pilot runs a **real

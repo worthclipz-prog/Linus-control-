@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import Config
 from .runner import AgentRunner
+from .scheduler import Scheduler
 
 PAGE = """<!doctype html>
 <html lang="en"><head>
@@ -71,8 +72,53 @@ PAGE = """<!doctype html>
   #prompt input { flex: 1; min-width: 0; padding: 11px; background: #0b0f17; color: #e5e9f0; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: #4a556b; flex: none; }
   .dot.on { background: #41d18f; }
+  #schedBtn { flex: none; background: #2a3550; padding: 7px 10px; font-size: 13px; }
+  /* Timers panel: fixed between header and footer, scrolls on its own */
+  #sched { display: none; position: fixed; top: 54px; bottom: 64px; left: 0; right: 0; z-index: 90;
+           overflow-y: auto; background: #0b0f17; padding: 12px 16px; }
+  #sched h3 { margin: 4px 0 10px; font-size: 15px; }
+  #sched .form { display: grid; gap: 8px; background: #121826; padding: 12px; border-radius: 8px; }
+  #sched .form .row { display: flex; gap: 8px; }
+  #sched input, #sched select, #sched textarea { flex: 1; min-width: 0; padding: 10px; background: #0b0f17;
+           color: #e5e9f0; font: inherit; border-radius: 8px; border: 1px solid #2a3550; }
+  #sched textarea { min-height: 64px; resize: vertical; }
+  #sched .note { color: #8b95a7; font-size: 12px; }
+  #sched .err { color: #ff8a8a; font-size: 13px; min-height: 1em; }
+  .job { background: #121826; border-radius: 8px; padding: 10px; margin: 8px 0; }
+  .job .t { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .job .meta { color: #8b95a7; font-size: 12px; margin: 4px 0 8px; }
+  .job .acts { display: flex; gap: 8px; }
+  .job .acts button { padding: 7px 12px; font-size: 13px; }
+  .job.off { opacity: .55; }
 </style></head><body>
-<header><span class="dot" id="dot"></span><b>Pilot</b><span class="muted" id="status">connecting...</span></header>
+<header><span class="dot" id="dot"></span><b>Pilot</b><span class="muted" id="status">connecting...</span>
+  <button id="schedBtn">Timers</button></header>
+<div id="sched">
+  <h3>Timers <span class="note">(times are IST)</span></h3>
+  <div class="form">
+    <textarea id="sTask" placeholder="What should Pilot do? e.g. open gmail and read my unread subjects"></textarea>
+    <div class="row">
+      <select id="sEvery">
+        <option value="once">Once</option>
+        <option value="daily">Every day</option>
+        <option value="weekly">Every week</option>
+      </select>
+      <input id="sTime" type="time" value="09:00">
+    </div>
+    <div class="row">
+      <input id="sDate" type="date">
+      <select id="sWeekday" style="display:none">
+        <option value="mon">Mon</option><option value="tue">Tue</option><option value="wed">Wed</option>
+        <option value="thu">Thu</option><option value="fri">Fri</option><option value="sat">Sat</option>
+        <option value="sun">Sun</option>
+      </select>
+    </div>
+    <div class="err" id="sErr"></div>
+    <div class="row"><button id="sAdd">Add timer</button></div>
+    <div class="note">Unattended runs need auto-approve on, or a task may pause waiting for a confirmation.</div>
+  </div>
+  <div id="jobs"></div>
+</div>
 <div id="prompt"><div class="q" id="promptText"></div>
   <div class="row"><input id="promptInput" placeholder="your answer"><button id="promptSend">Send</button></div>
 </div>
@@ -101,7 +147,11 @@ function add(ev){
 async function api(path, opts){
   opts = opts || {}; opts.headers = Object.assign({'X-Pilot-Token': TOKEN}, opts.headers||{});
   const r = await fetch(path + (path.includes('?')?'&':'?') + 'token=' + encodeURIComponent(TOKEN), opts);
-  if(!r.ok) throw new Error('http '+r.status);
+  if(!r.ok){
+    let msg = 'http '+r.status;
+    try { const j = await r.json(); if(j && j.error) msg = j.error; } catch(e){}
+    throw new Error(msg);
+  }
   return r.json();
 }
 async function poll(){
@@ -174,6 +224,58 @@ document.getElementById('send').onclick = async () => {
 };
 document.getElementById('task').addEventListener('keydown', e => { if(e.key==='Enter') document.getElementById('send').click(); });
 document.getElementById('stop').onclick = () => api('/api/stop', {method:'POST'});
+
+// --- Timers ---
+const sched = document.getElementById('sched');
+document.getElementById('schedBtn').onclick = () => {
+  const open = sched.style.display !== 'block';
+  sched.style.display = open ? 'block' : 'none';
+  if(open) loadJobs();
+};
+function syncEveryFields(){
+  const v = document.getElementById('sEvery').value;
+  document.getElementById('sDate').style.display = v === 'once' ? 'block' : 'none';
+  document.getElementById('sWeekday').style.display = v === 'weekly' ? 'block' : 'none';
+}
+document.getElementById('sEvery').onchange = syncEveryFields;
+(function(){ const d = new Date(); const p = n => String(n).padStart(2,'0');
+  document.getElementById('sDate').value = d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); })();
+syncEveryFields();
+async function loadJobs(){
+  let jobs = [];
+  try { jobs = (await api('/api/schedule')).jobs || []; } catch(e){ return; }
+  const box = document.getElementById('jobs'); box.innerHTML = '';
+  if(!jobs.length){ box.innerHTML = '<div class="note">No timers yet.</div>'; return; }
+  for(const j of jobs){
+    const d = document.createElement('div'); d.className = 'job' + (j.enabled ? '' : ' off');
+    d.innerHTML = '<div class="t">'+esc(j.task)+'</div>'
+      + '<div class="meta">'+esc(j.desc)+(j.enabled ? ' · next: '+esc(j.next_human) : ' · paused')+'</div>'
+      + '<div class="acts"><button class="tg">'+(j.enabled?'Pause':'Resume')+'</button>'
+      + '<button class="stop del">Delete</button></div>';
+    d.querySelector('.tg').onclick = async () => {
+      await api('/api/schedule/toggle', {method:'POST', body: JSON.stringify({id:j.id, enabled: !j.enabled})}); loadJobs();
+    };
+    d.querySelector('.del').onclick = async () => {
+      await api('/api/schedule/delete', {method:'POST', body: JSON.stringify({id:j.id})}); loadJobs();
+    };
+    box.appendChild(d);
+  }
+}
+document.getElementById('sAdd').onclick = async () => {
+  const err = document.getElementById('sErr'); err.textContent = '';
+  const body = {
+    task: document.getElementById('sTask').value,
+    every: document.getElementById('sEvery').value,
+    time: document.getElementById('sTime').value,
+    date: document.getElementById('sDate').value,
+    weekday: document.getElementById('sWeekday').value,
+  };
+  try {
+    await api('/api/schedule', {method:'POST', body: JSON.stringify(body)});
+    document.getElementById('sTask').value = ''; loadJobs();
+  } catch(e){ err.textContent = e.message || 'Could not add timer.'; }
+};
+
 setInterval(poll, 1200); poll();
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('sw.js?token='+encodeURIComponent(TOKEN)).catch(()=>{}); }
 </script></body></html>
@@ -193,7 +295,7 @@ ICON_SVG = (
 SW_JS = "self.addEventListener('fetch', () => {});\n"  # no-op SW, just enables install
 
 
-def _make_handler(runner: AgentRunner, token: str):
+def _make_handler(runner: AgentRunner, token: str, scheduler=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -244,6 +346,8 @@ def _make_handler(runner: AgentRunner, token: str):
                 q = parse_qs(urlparse(self.path).query)
                 since = int((q.get("since") or ["0"])[0])
                 return self._json({"events": runner.events_since(since), "status": runner.status()})
+            if path == "/api/schedule":
+                return self._json({"jobs": scheduler.list() if scheduler else []})
             return self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
@@ -267,6 +371,29 @@ def _make_handler(runner: AgentRunner, token: str):
             if path == "/api/stop":
                 runner.stop()
                 return self._json({"ok": True})
+            if path == "/api/schedule":
+                if not scheduler:
+                    return self._json({"error": "scheduler off"}, 400)
+                d = self._read_json()
+                try:
+                    job = scheduler.add(
+                        task=str(d.get("task", "")),
+                        every=str(d.get("every", "once")),
+                        time_str=str(d.get("time", "")),
+                        date=d.get("date"),
+                        weekday=d.get("weekday"),
+                        tz=d.get("tz"),
+                    )
+                except ValueError as exc:
+                    return self._json({"error": str(exc)}, 400)
+                return self._json({"ok": True, "id": job["id"]})
+            if path == "/api/schedule/delete":
+                ok = scheduler and scheduler.remove(str(self._read_json().get("id", "")))
+                return self._json({"ok": bool(ok)})
+            if path == "/api/schedule/toggle":
+                d = self._read_json()
+                ok = scheduler and scheduler.toggle(str(d.get("id", "")), bool(d.get("enabled")))
+                return self._json({"ok": bool(ok)})
             return self._json({"error": "not found"}, 404)
 
     return Handler
@@ -275,7 +402,12 @@ def _make_handler(runner: AgentRunner, token: str):
 def run_server(config: Config) -> int:
     token = config.server.token or secrets.token_urlsafe(18)
     runner = AgentRunner(config)
-    handler = _make_handler(runner, token)
+    scheduler = Scheduler(
+        submit=runner.submit,
+        path=str(config.config_dir / "schedule.json"),
+        on_event=runner._record,
+    )
+    handler = _make_handler(runner, token, scheduler)
     httpd = ThreadingHTTPServer((config.server.host, config.server.port), handler)
 
     host_shown = "127.0.0.1" if config.server.host in ("0.0.0.0", "") else config.server.host
@@ -293,5 +425,6 @@ def run_server(config: Config) -> int:
         print("\nShutting down.")
     finally:
         httpd.shutdown()
+        scheduler.close()
         runner.close()
     return 0

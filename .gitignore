@@ -12,3 +12,6 @@ venv/
 build/
 dist/
 .pytest_cache/
+
+# Scheduled timers (local)
+schedule.json
